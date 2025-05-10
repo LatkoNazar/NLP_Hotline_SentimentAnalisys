@@ -69,15 +69,19 @@ def get_review(data):
     data.loc[:,"recommend"] = data["recommend"].apply(lambda x: 1 if x == "рекомендує цей товар" else (0 if x == "не рекомендує" else np.nan))
     data = data[["recommend", "liked", "disliked", "experience", "comment"]].copy()
     data["experience"] = data["experience"].apply(process_exp)
+
     for col in ["liked", "disliked", "comment"]:
         data[col] = data[col].apply(clean_text)
+
     df = data[["recommend", "experience", "liked", "disliked", "comment"]].copy()
+
     df["language"] = df["comment"].apply(detect_lang)
     df["language"] = df["language"].apply(lambda x: "uk" if x not in ["uk", "ru"] else ("ru" if x == "ru" else "uk"))
 
     df["liked"] = df["liked"].apply(processing)
     df["disliked"] = df["disliked"].apply(processing)
     df["comment"] = df["comment"].apply(processing)
+
     for col in ["liked", "disliked", "comment"]:
         df[col] = df[col].apply(processing)
         df[col] = df.apply(
@@ -87,45 +91,36 @@ def get_review(data):
         df[col + "_len"] = df[col].apply(lambda x: len(x.split()))
     return df
 
+def load_models():
+    tfidf_liked = joblib.load('pkl_models/tfidf_liked.pkl')
+    tfidf_disliked = joblib.load('pkl_models/tfidf_disliked.pkl')
+    tfidf_comment = joblib.load('pkl_models/tfidf_comment.pkl')
+    model = joblib.load('pkl_models/model.pkl')
+    return tfidf_liked, tfidf_disliked, tfidf_comment, model
 
-tfidf_liked = joblib.load('pkl_models/tfidf_liked.pkl')
-tfidf_disliked = joblib.load('pkl_models/tfidf_disliked.pkl')
-tfidf_comment = joblib.load('pkl_models/tfidf_comment.pkl')
-model = joblib.load('pkl_models/model.pkl')
+def label_null_values(path, tfidf_liked, tfidf_disliked, tfidf_comment, model):
+    data = pd.read_csv(path)
+    unmarked = data[data["recommend"].isnull()]
+    df = get_review(unmarked)
+    unmarked_data = df[["recommend", "liked", "disliked", "experience", "comment"]].copy()
 
-data = pd.read_csv("reviews_to_mark/hotline_iphone_reviews.csv")
-print(data["recommend"].value_counts())
-unmarked = data[data["recommend"].isnull()]
-marked = data[data["recommend"].notnull()]
+    x_tfidf_liked = pd.DataFrame(tfidf_liked.transform(unmarked_data["liked"]).toarray(), columns=["liked_" + f for f in tfidf_liked.get_feature_names_out()])
+    x_tfidf_disliked = pd.DataFrame(tfidf_disliked.transform(unmarked_data["disliked"]).toarray(), columns=["disliked_" + f for f in tfidf_disliked.get_feature_names_out()])
+    x_tfidf_comment = pd.DataFrame(tfidf_comment.transform(unmarked_data["comment"]).toarray(), columns=["comment_" + f for f in tfidf_comment.get_feature_names_out()])
 
-df = get_review(unmarked)
+    x_tfidf = pd.concat([
+        x_tfidf_liked.reset_index(drop=True),
+        x_tfidf_disliked.reset_index(drop=True),
+        x_tfidf_comment.reset_index(drop=True),
+        unmarked_data[["experience"]].reset_index(drop=True)
+    ], axis=1)
+    y_pred_prob = model.predict_proba(x_tfidf)[:, 1]
+    y_pred = (y_pred_prob > 0.4).astype(int)
+    data.loc[unmarked.index, "recommend"] = y_pred
+    data.loc[:, "recommend"] = data["recommend"].apply(lambda x: "рекомендує цей товар" if x == 1 else ("не рекомендує цей товар" if x == 0 else x))
+    return data
 
-print("Null's count: ", data["recommend"].isnull().sum())
-print("Len df:", len(data))
-
-unmarked_data = df[["recommend", "liked", "disliked", "experience", "comment"]].copy()
-
-X_tfidf_liked = pd.DataFrame(tfidf_liked.transform(unmarked_data["liked"]).toarray(), columns=["liked_" + f for f in tfidf_liked.get_feature_names_out()])
-X_tfidf_disliked = pd.DataFrame(tfidf_disliked.transform(unmarked_data["disliked"]).toarray(), columns=["disliked_" + f for f in tfidf_disliked.get_feature_names_out()])
-X_tfidf_comment = pd.DataFrame(tfidf_comment.transform(unmarked_data["comment"]).toarray(), columns=["comment_" + f for f in tfidf_comment.get_feature_names_out()])
-
-x_tfidf = pd.concat([
-    X_tfidf_liked.reset_index(drop=True),
-    X_tfidf_disliked.reset_index(drop=True),
-    X_tfidf_comment.reset_index(drop=True),
-    unmarked_data[["experience"]].reset_index(drop=True)
-], axis=1)
-
-y_true = df["recommend"]
-
-y_pred_prob = model.predict_proba(x_tfidf)[:, 1]
-y_pred = (y_pred_prob > 0.4).astype(int)
-
-data.loc[unmarked.index, "recommend"] = y_pred
-data.loc[:, "recommend"] = data["recommend"].apply(lambda x: "рекомендує цей товар" if x == 1 else ("не рекомендує цей товар" if x == 0 else x))
-data.to_csv("reviews_marked_iphone.csv", index=False)
-
-print("Null's count: ", data["recommend"].isnull().sum())
-print("Len df:", len(data))
-
-print(data["recommend"].value_counts())
+def main():
+    tfidf_liked, tfidf_disliked, tfidf_comment, model = load_models()
+    data = label_null_values("reviews_to_mark/hotline_iphone_reviews.csv", tfidf_liked, tfidf_disliked, tfidf_comment, model)
+    data.to_csv("reviews_marked_iphone.csv", index=False)
